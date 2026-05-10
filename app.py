@@ -5,15 +5,13 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import ta
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # =========================================================
 # CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="BTC Quant Breakout Lab",
+    page_title="BTC Probability Engine",
     layout="wide"
 )
 
@@ -21,17 +19,23 @@ st.set_page_config(
 # TITLE
 # =========================================================
 
-st.title("🚀 BTC Quant Breakout Lab")
+st.title("🧠 BTC Probability Engine")
 
 st.markdown("""
-Laboratório quantitativo para detectar setups robustos no Bitcoin diário.
+Este app NÃO procura sinais antigos no gráfico.
 
-### Estrutura:
-- Tendência forte
-- Compressão de volatilidade
-- Breakout
-- Alvo fixo de +3%
-- Sem stop loss
+Ele analisa a ESTRUTURA ATUAL do Bitcoin no gráfico diário e responde:
+
+# 👉 Qual a probabilidade matemática do BTC subir +3%?
+
+Baseado em:
+- tendência
+- força
+- volatilidade
+- compressão
+- breakout
+- momentum
+- comportamento histórico semelhante
 """)
 
 # =========================================================
@@ -40,44 +44,25 @@ Laboratório quantitativo para detectar setups robustos no Bitcoin diário.
 
 st.sidebar.header("⚙️ Configurações")
 
-ticker = st.sidebar.selectbox(
-    "Ativo",
-    ["BTC-USD"],
-)
-
 period = st.sidebar.selectbox(
-    "Período",
+    "Histórico",
     ["2y", "5y", "10y"],
     index=2
 )
 
 target_gain = st.sidebar.slider(
-    "Gain (%)",
+    "Gain alvo (%)",
     1.0,
     10.0,
     3.0,
     0.5
 )
 
-max_hold = st.sidebar.slider(
-    "Máximo candles",
+future_bars = st.sidebar.slider(
+    "Máximo candles futuros",
     1,
     30,
     10
-)
-
-adx_min = st.sidebar.slider(
-    "ADX mínimo",
-    10,
-    50,
-    22
-)
-
-breakout_lookback = st.sidebar.slider(
-    "Rompimento máxima",
-    2,
-    20,
-    3
 )
 
 # =========================================================
@@ -88,27 +73,21 @@ breakout_lookback = st.sidebar.slider(
 def load_data():
 
     df = yf.download(
-        ticker,
+        "BTC-USD",
         period=period,
         interval="1d",
         auto_adjust=True,
         progress=False
     )
 
-    # =========================================
-    # CORREÇÃO MULTI-INDEX
-    # =========================================
-
+    # Corrigir MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
-    df = df.rename(columns=str)
 
     cols = ["Open", "High", "Low", "Close", "Volume"]
 
     df = df[cols].copy()
 
-    # Garantir Series 1D
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -127,9 +106,10 @@ high = df["High"]
 low = df["Low"]
 volume = df["Volume"]
 
-# EMAs
-df["EMA50"] = ta.trend.ema_indicator(close=close, window=50)
-df["EMA200"] = ta.trend.ema_indicator(close=close, window=200)
+# EMA
+df["EMA21"] = ta.trend.ema_indicator(close, window=21)
+df["EMA50"] = ta.trend.ema_indicator(close, window=50)
+df["EMA200"] = ta.trend.ema_indicator(close, window=200)
 
 # ADX
 adx = ta.trend.ADXIndicator(
@@ -153,6 +133,9 @@ atr = ta.volatility.AverageTrueRange(
 
 df["ATR"] = atr.average_true_range()
 
+# RSI
+df["RSI"] = ta.momentum.rsi(close, window=14)
+
 # Bollinger
 bb = ta.volatility.BollingerBands(
     close=close,
@@ -160,323 +143,265 @@ bb = ta.volatility.BollingerBands(
     window_dev=2
 )
 
-df["BB_HIGH"] = bb.bollinger_hband()
-df["BB_LOW"] = bb.bollinger_lband()
-
 df["BB_WIDTH"] = (
-    (df["BB_HIGH"] - df["BB_LOW"]) / df["Close"]
+    (bb.bollinger_hband() - bb.bollinger_lband())
+    / close
 )
 
-# =========================================================
-# FILTERS
-# =========================================================
-
-# Tendência
-trend_filter = (
-    (df["Close"] > df["EMA50"]) &
-    (df["EMA50"] > df["EMA200"])
-)
-
-# Força
-strength_filter = (
-    (df["ADX"] > adx_min) &
-    (df["DI_POS"] > df["DI_NEG"])
-)
-
-# Compressão ATR
-df["ATR_MEAN"] = df["ATR"].rolling(50).mean()
-
-compression_filter = (
-    df["ATR"] < df["ATR_MEAN"] * 0.8
-)
-
-# Compressão Bollinger
-df["BB_WIDTH_MEAN"] = df["BB_WIDTH"].rolling(50).mean()
-
-bb_compression = (
-    df["BB_WIDTH"] < df["BB_WIDTH_MEAN"] * 0.8
-)
-
-# Breakout
-rolling_high = (
-    df["High"]
-    .rolling(breakout_lookback)
-    .max()
-    .shift(1)
-)
-
-breakout_filter = (
-    df["Close"] > rolling_high
-)
-
-# Volume
-df["VOL_MA20"] = df["Volume"].rolling(20).mean()
-
-volume_filter = (
-    df["Volume"] > df["VOL_MA20"]
-)
+# Volume média
+df["VOL_MA20"] = volume.rolling(20).mean()
 
 # =========================================================
-# FINAL SIGNAL
+# CURRENT STRUCTURE
 # =========================================================
 
-df["SIGNAL"] = (
-    trend_filter &
-    strength_filter &
-    (compression_filter | bb_compression) &
-    breakout_filter &
-    volume_filter
-)
+latest = df.iloc[-1]
 
 # =========================================================
-# BACKTEST
+# SCORING ENGINE
 # =========================================================
 
-results = []
+score = 0
+max_score = 100
 
-signals = df[df["SIGNAL"]].copy()
+details = []
 
-for idx in signals.index:
+# ---------------------------------------------------------
+# TENDÊNCIA
+# ---------------------------------------------------------
 
-    entry_price = df.loc[idx, "Close"]
-
-    future = df.loc[idx:].iloc[1:max_hold + 1]
-
-    if len(future) == 0:
-        continue
-
-    target_price = entry_price * (1 + target_gain / 100)
-
-    hit_target = False
-
-    mae = 0
-    mfe = 0
-    days_to_target = None
-
-    for i, row in enumerate(future.itertuples()):
-
-        low_return = (
-            (row.Low / entry_price) - 1
-        ) * 100
-
-        high_return = (
-            (row.High / entry_price) - 1
-        ) * 100
-
-        mae = min(mae, low_return)
-        mfe = max(mfe, high_return)
-
-        if row.High >= target_price:
-
-            hit_target = True
-            days_to_target = i + 1
-            break
-
-    results.append({
-        "Date": idx,
-        "Entry": round(entry_price, 2),
-        "Hit_Target": hit_target,
-        "MAE_%": round(mae, 2),
-        "MFE_%": round(mfe, 2),
-        "Days_To_Target": days_to_target
-    })
-
-results_df = pd.DataFrame(results)
-
-# =========================================================
-# METRICS
-# =========================================================
-
-st.header("📊 Estatísticas")
-
-if len(results_df) > 0:
-
-    total = len(results_df)
-
-    wins = results_df["Hit_Target"].sum()
-
-    win_rate = (wins / total) * 100
-
-    avg_mae = results_df["MAE_%"].mean()
-
-    worst_mae = results_df["MAE_%"].min()
-
-    avg_mfe = results_df["MFE_%"].mean()
-
-    avg_days = results_df["Days_To_Target"].dropna().mean()
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Trades", total)
-    c2.metric("Win Rate", f"{win_rate:.2f}%")
-    c3.metric("MAE Médio", f"{avg_mae:.2f}%")
-    c4.metric("Pior MAE", f"{worst_mae:.2f}%")
-
-    c5, c6 = st.columns(2)
-
-    c5.metric("MFE Médio", f"{avg_mfe:.2f}%")
-
-    if not np.isnan(avg_days):
-        c6.metric("Dias até alvo", f"{avg_days:.2f}")
-
-# =========================================================
-# CURRENT SIGNAL
-# =========================================================
-
-st.header("🟢 Situação Atual")
-
-if df["SIGNAL"].iloc[-1]:
-    st.success("SETUP ATIVO NO ÚLTIMO CANDLE")
+if latest["Close"] > latest["EMA21"]:
+    score += 10
+    details.append(("Preço acima EMA21", "✅ +10"))
 else:
-    st.warning("Nenhum setup ativo atualmente")
+    details.append(("Preço acima EMA21", "❌"))
+
+if latest["EMA21"] > latest["EMA50"]:
+    score += 15
+    details.append(("EMA21 acima EMA50", "✅ +15"))
+else:
+    details.append(("EMA21 acima EMA50", "❌"))
+
+if latest["EMA50"] > latest["EMA200"]:
+    score += 20
+    details.append(("EMA50 acima EMA200", "✅ +20"))
+else:
+    details.append(("EMA50 acima EMA200", "❌"))
+
+# ---------------------------------------------------------
+# FORÇA
+# ---------------------------------------------------------
+
+if latest["ADX"] > 22:
+    score += 15
+    details.append(("ADX forte", "✅ +15"))
+else:
+    details.append(("ADX forte", "❌"))
+
+if latest["DI_POS"] > latest["DI_NEG"]:
+    score += 10
+    details.append(("DI+ acima DI−", "✅ +10"))
+else:
+    details.append(("DI+ acima DI−", "❌"))
+
+# ---------------------------------------------------------
+# MOMENTUM
+# ---------------------------------------------------------
+
+if latest["RSI"] > 55:
+    score += 10
+    details.append(("RSI momentum", "✅ +10"))
+else:
+    details.append(("RSI momentum", "❌"))
+
+# ---------------------------------------------------------
+# VOLUME
+# ---------------------------------------------------------
+
+if latest["Volume"] > latest["VOL_MA20"]:
+    score += 10
+    details.append(("Volume acima média", "✅ +10"))
+else:
+    details.append(("Volume acima média", "❌"))
+
+# ---------------------------------------------------------
+# COMPRESSÃO
+# ---------------------------------------------------------
+
+bb_mean = df["BB_WIDTH"].rolling(50).mean().iloc[-1]
+
+if latest["BB_WIDTH"] < bb_mean:
+    score += 10
+    details.append(("Compressão volatilidade", "✅ +10"))
+else:
+    details.append(("Compressão volatilidade", "❌"))
 
 # =========================================================
-# CHART
+# HISTORICAL MATCH ENGINE
 # =========================================================
 
-fig = make_subplots(
-    rows=2,
-    cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.05,
-    row_heights=[0.7, 0.3]
-)
+historical = []
 
-# Candles
-fig.add_trace(
-    go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
-        name="BTC"
-    ),
-    row=1,
-    col=1
-)
+for i in range(250, len(df) - future_bars):
 
-# EMA50
-fig.add_trace(
-    go.Scatter(
-        x=df.index,
-        y=df["EMA50"],
-        name="EMA50"
-    ),
-    row=1,
-    col=1
-)
+    row = df.iloc[i]
 
-# EMA200
-fig.add_trace(
-    go.Scatter(
-        x=df.index,
-        y=df["EMA200"],
-        name="EMA200"
-    ),
-    row=1,
-    col=1
-)
+    local_score = 0
 
-# Sinais
-signal_points = df[df["SIGNAL"]]
+    if row["Close"] > row["EMA21"]:
+        local_score += 10
 
-fig.add_trace(
-    go.Scatter(
-        x=signal_points.index,
-        y=signal_points["Close"],
-        mode="markers",
-        name="Sinal"
-    ),
-    row=1,
-    col=1
-)
+    if row["EMA21"] > row["EMA50"]:
+        local_score += 15
 
-# ADX
-fig.add_trace(
-    go.Scatter(
-        x=df.index,
-        y=df["ADX"],
-        name="ADX"
-    ),
-    row=2,
-    col=1
-)
+    if row["EMA50"] > row["EMA200"]:
+        local_score += 20
 
-fig.update_layout(
-    height=900,
-    xaxis_rangeslider_visible=False
-)
+    if row["ADX"] > 22:
+        local_score += 15
 
-st.plotly_chart(fig, use_container_width=True)
+    if row["DI_POS"] > row["DI_NEG"]:
+        local_score += 10
 
-# =========================================================
-# TABLE
-# =========================================================
+    if row["RSI"] > 55:
+        local_score += 10
 
-st.header("📋 Trades")
+    if row["Volume"] > row["VOL_MA20"]:
+        local_score += 10
 
-if len(results_df) > 0:
-
-    display_df = results_df.copy()
-
-    display_df["Hit_Target"] = display_df["Hit_Target"].map({
-        True: "✅",
-        False: "❌"
-    })
-
-    st.dataframe(
-        display_df.sort_values(
-            "Date",
-            ascending=False
-        ),
-        use_container_width=True
+    local_bb_mean = (
+        df["BB_WIDTH"]
+        .rolling(50)
+        .mean()
+        .iloc[i]
     )
 
-else:
+    if row["BB_WIDTH"] < local_bb_mean:
+        local_score += 10
 
-    st.warning("Nenhum trade encontrado.")
+    similarity = abs(local_score - score)
+
+    future = df.iloc[i + 1:i + 1 + future_bars]
+
+    target = row["Close"] * (1 + target_gain / 100)
+
+    hit = (future["High"] >= target).any()
+
+    historical.append({
+        "score": local_score,
+        "similarity": similarity,
+        "hit": hit
+    })
+
+hist_df = pd.DataFrame(historical)
 
 # =========================================================
-# ANALYSIS
+# MOST SIMILAR STRUCTURES
+# =========================================================
+
+similar_df = hist_df[
+    hist_df["similarity"] <= 5
+].copy()
+
+total_cases = len(similar_df)
+
+wins = similar_df["hit"].sum()
+
+if total_cases > 0:
+    probability = (wins / total_cases) * 100
+else:
+    probability = 0
+
+# =========================================================
+# FINAL RESULT
+# =========================================================
+
+st.header("🎯 Resultado Probabilístico Atual")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric(
+    "Score Estrutural",
+    f"{score}/100"
+)
+
+col2.metric(
+    "Casos Históricos Similares",
+    total_cases
+)
+
+col3.metric(
+    f"Chance de +{target_gain:.1f}%",
+    f"{probability:.2f}%"
+)
+
+# =========================================================
+# INTERPRETAÇÃO
 # =========================================================
 
 st.header("🧠 Interpretação")
 
-if len(results_df) > 0:
+if probability >= 70:
 
-    if win_rate >= 70:
+    st.success(f"""
+ESTRUTURA MUITO FORTE.
 
-        st.success("""
-Setup robusto estatisticamente para alvo de +3%.
-        """)
+Historicamente, estruturas semelhantes atingiram
++{target_gain:.1f}% em aproximadamente {probability:.1f}% das vezes.
+""")
 
-    elif win_rate >= 60:
+elif probability >= 60:
 
-        st.warning("""
-Setup promissor, mas ainda não ideal.
-        """)
+    st.warning(f"""
+ESTRUTURA MODERADAMENTE POSITIVA.
 
-    else:
+Existe vantagem estatística, mas não extrema.
+""")
 
-        st.error("""
-Setup fraco para operação sem stop.
-        """)
+else:
 
-    st.markdown(f"""
-### Resumo
+    st.error(f"""
+ESTRUTURA FRACA.
 
-- Win rate: **{win_rate:.2f}%**
-- Drawdown médio: **{avg_mae:.2f}%**
-- Pior drawdown: **{worst_mae:.2f}%**
-- Expansão média: **{avg_mfe:.2f}%**
-
-Sem stop loss, o dado MAIS importante é o MAE.
+Historicamente o BTC não apresentou consistência suficiente
+para atingir +{target_gain:.1f}% rapidamente.
 """)
 
 # =========================================================
-# FOOTER
+# DETALHES DA ESTRUTURA
+# =========================================================
+
+st.header("📋 Componentes da Estrutura Atual")
+
+details_df = pd.DataFrame(
+    details,
+    columns=["Fator", "Status"]
+)
+
+st.dataframe(
+    details_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+# =========================================================
+# EXTREME WARNING
 # =========================================================
 
 st.markdown("---")
-st.caption("BTC Quant Breakout Lab")
+
+st.warning("""
+IMPORTANTE:
+
+Este modelo NÃO prevê o futuro.
+
+Ele mede:
+
+- quantas vezes estruturas parecidas ocorreram
+- e qual foi o resultado histórico depois disso
+
+Ou seja:
+
+é um motor de PROBABILIDADE ESTATÍSTICA,
+não uma previsão absoluta.
+""")
