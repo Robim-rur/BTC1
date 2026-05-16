@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -70,17 +68,17 @@ future_bars = st.sidebar.slider(
 # =========================================================
 
 @st.cache_data
-def load_data():
+def load_data(period_selected):
 
     df = yf.download(
         "BTC-USD",
-        period=period,
+        period=period_selected,
         interval="1d",
         auto_adjust=True,
         progress=False
     )
 
-    # Corrigir MultiIndex
+    # Corrige MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -88,42 +86,75 @@ def load_data():
 
     df = df[cols].copy()
 
+    # Garantir float
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df.dropna(inplace=True)
 
+    # Reset index evita vários bugs da ta library
+    df.reset_index(drop=True, inplace=True)
+
     return df
 
-df = load_data()
+df = load_data(period)
+
+# =========================================================
+# VALIDAÇÃO
+# =========================================================
+
+if len(df) < 250:
+
+    st.error("Poucos dados para análise.")
+
+    st.stop()
 
 # =========================================================
 # INDICATORS
 # =========================================================
 
-close = df["Close"]
-high = df["High"]
-low = df["Low"]
-volume = df["Volume"]
+close = df["Close"].astype(float)
+high = df["High"].astype(float)
+low = df["Low"].astype(float)
+volume = df["Volume"].astype(float)
 
+# =========================================================
 # EMA
+# =========================================================
+
 df["EMA21"] = ta.trend.ema_indicator(close, window=21)
 df["EMA50"] = ta.trend.ema_indicator(close, window=50)
 df["EMA200"] = ta.trend.ema_indicator(close, window=200)
 
-# ADX
-adx = ta.trend.ADXIndicator(
-    high=high,
-    low=low,
-    close=close,
-    window=14
-)
+# =========================================================
+# ADX (CORRIGIDO)
+# =========================================================
 
-df["ADX"] = adx.adx()
-df["DI_POS"] = adx.adx_pos()
-df["DI_NEG"] = adx.adx_neg()
+try:
 
+    adx = ta.trend.ADXIndicator(
+        high=high,
+        low=low,
+        close=close,
+        window=14
+    )
+
+    df["ADX"] = adx.adx()
+    df["DI_POS"] = adx.adx_pos()
+    df["DI_NEG"] = adx.adx_neg()
+
+except Exception as e:
+
+    st.error(f"Erro ao calcular ADX: {e}")
+
+    df["ADX"] = np.nan
+    df["DI_POS"] = np.nan
+    df["DI_NEG"] = np.nan
+
+# =========================================================
 # ATR
+# =========================================================
+
 atr = ta.volatility.AverageTrueRange(
     high=high,
     low=low,
@@ -133,10 +164,16 @@ atr = ta.volatility.AverageTrueRange(
 
 df["ATR"] = atr.average_true_range()
 
+# =========================================================
 # RSI
+# =========================================================
+
 df["RSI"] = ta.momentum.rsi(close, window=14)
 
-# Bollinger
+# =========================================================
+# BOLLINGER
+# =========================================================
+
 bb = ta.volatility.BollingerBands(
     close=close,
     window=20,
@@ -148,8 +185,17 @@ df["BB_WIDTH"] = (
     / close
 )
 
-# Volume média
+# =========================================================
+# VOLUME MÉDIA
+# =========================================================
+
 df["VOL_MA20"] = volume.rolling(20).mean()
+
+# =========================================================
+# REMOVE NANs
+# =========================================================
+
+df.dropna(inplace=True)
 
 # =========================================================
 # CURRENT STRUCTURE
@@ -162,13 +208,12 @@ latest = df.iloc[-1]
 # =========================================================
 
 score = 0
-max_score = 100
 
 details = []
 
-# ---------------------------------------------------------
+# =========================================================
 # TENDÊNCIA
-# ---------------------------------------------------------
+# =========================================================
 
 if latest["Close"] > latest["EMA21"]:
     score += 10
@@ -188,9 +233,9 @@ if latest["EMA50"] > latest["EMA200"]:
 else:
     details.append(("EMA50 acima EMA200", "❌"))
 
-# ---------------------------------------------------------
+# =========================================================
 # FORÇA
-# ---------------------------------------------------------
+# =========================================================
 
 if latest["ADX"] > 22:
     score += 15
@@ -204,9 +249,9 @@ if latest["DI_POS"] > latest["DI_NEG"]:
 else:
     details.append(("DI+ acima DI−", "❌"))
 
-# ---------------------------------------------------------
+# =========================================================
 # MOMENTUM
-# ---------------------------------------------------------
+# =========================================================
 
 if latest["RSI"] > 55:
     score += 10
@@ -214,9 +259,9 @@ if latest["RSI"] > 55:
 else:
     details.append(("RSI momentum", "❌"))
 
-# ---------------------------------------------------------
+# =========================================================
 # VOLUME
-# ---------------------------------------------------------
+# =========================================================
 
 if latest["Volume"] > latest["VOL_MA20"]:
     score += 10
@@ -224,9 +269,9 @@ if latest["Volume"] > latest["VOL_MA20"]:
 else:
     details.append(("Volume acima média", "❌"))
 
-# ---------------------------------------------------------
+# =========================================================
 # COMPRESSÃO
-# ---------------------------------------------------------
+# =========================================================
 
 bb_mean = df["BB_WIDTH"].rolling(50).mean().iloc[-1]
 
@@ -313,7 +358,7 @@ else:
     probability = 0
 
 # =========================================================
-# FINAL RESULT
+# RESULTADO
 # =========================================================
 
 st.header("🎯 Resultado Probabilístico Atual")
@@ -368,7 +413,7 @@ para atingir +{target_gain:.1f}% rapidamente.
 """)
 
 # =========================================================
-# DETALHES DA ESTRUTURA
+# DETALHES
 # =========================================================
 
 st.header("📋 Componentes da Estrutura Atual")
@@ -385,7 +430,7 @@ st.dataframe(
 )
 
 # =========================================================
-# EXTREME WARNING
+# WARNING
 # =========================================================
 
 st.markdown("---")
